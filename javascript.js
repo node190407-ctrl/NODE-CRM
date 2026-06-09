@@ -1305,7 +1305,31 @@ function contactos() {
   if (filt) list = list.filter(c => c.fuente === filt);
   list.sort((a,b) => b.actualizadoEn - a.actualizadoEn);
 
+  const pendientes = list.filter(c => !c.realizado);
+  const realizados = list.filter(c =>  c.realizado);
+
   const fuentes = [...new Set(S.contactos.map(c => c.fuente))];
+
+  let realizadosHTML = '';
+  if (realizados.length > 0) {
+    realizadosHTML = `
+    <div id="section-contactos-realizados" class="realizados-section" style="margin-top:24px">
+      <div class="realizados-header">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+        Realizados
+        <span class="badge badge-neutral" style="font-size:10px">${realizados.length}</span>
+      </div>
+      <div class="contacts-table-wrap">
+        <table class="contacts-table">
+          <thead><tr>
+            <th>Contacto</th><th>Empresa</th><th>Fuente</th>
+            <th>Monto est.</th><th>Actualización</th><th>Acciones</th>
+          </tr></thead>
+          <tbody>${realizados.map(c => contactRowHTML(c, true)).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }
 
   document.getElementById('content').innerHTML = `
   <div class="view-header">
@@ -1323,29 +1347,31 @@ function contactos() {
       <button class="btn btn-primary" onclick="openContactoModal()">+ Contacto</button>
     </div>
   </div>
-  ${list.length === 0
+  ${pendientes.length === 0 && realizados.length === 0
     ? `<div class="empty"><div class="empty-icon">👥</div><p class="empty-title">Sin contactos</p><p class="empty-desc">Agrega tu primer prospecto para empezar.</p><button class="btn btn-primary" onclick="openContactoModal()">+ Nuevo contacto</button></div>`
-    : `<div class="contacts-table-wrap">
-        <table class="contacts-table">
-          <thead><tr>
-            <th>Contacto</th><th>Empresa</th><th>Fuente</th>
-            <th>Monto est.</th><th>Actualización</th><th>Acciones</th>
-          </tr></thead>
-          <tbody>${list.map(contactRowHTML).join('')}</tbody>
-        </table>
-      </div>`
+    : `${pendientes.length > 0
+        ? `<div class="contacts-table-wrap">
+            <table class="contacts-table">
+              <thead><tr>
+                <th>Contacto</th><th>Empresa</th><th>Fuente</th>
+                <th>Monto est.</th><th>Actualización</th><th>Acciones</th>
+              </tr></thead>
+              <tbody>${pendientes.map(c => contactRowHTML(c, false)).join('')}</tbody>
+            </table>
+          </div>`
+        : ''}
+       ${realizadosHTML}`
   }`;
 }
 
-function contactRowHTML(c) {
+function contactRowHTML(c, isRealizado = false) {
   // Etapa del deal más reciente del contacto
   const deals = dealsByContact(c.id)
     .sort((x, y) => y.actualizadoEn - x.actualizadoEn);
 
   const dealActivo = deals.find(d => d.etapa !== 'perdido') || deals[0];
   const etapa  = dealActivo ? getEtapa(dealActivo.etapa) : null;
-  const rowBg  = etapa ? etapa.bg    : 'transparent';
-  const rowTc  = etapa ? etapa.tc    : 'var(--n-600)';
+  const rowBg  = isRealizado ? 'var(--teal-25, #f0fdfb)' : (etapa ? etapa.bg : 'transparent');
 
   // Badge de etapa para la columna Fuente
   const etapaBadge = etapa
@@ -1358,10 +1384,12 @@ function contactRowHTML(c) {
 
   return `<tr onclick="openDetalleModal('${c.id}')"
     title="Ver detalle de ${escapeHTML(c.nombre)}"
-    style="background:${rowBg}">
+    style="background:${rowBg}${isRealizado ? ';opacity:.8' : ''}">
     <td><div class="contact-row-name">
       <div class="contact-avatar"
-        style="background:${etapa?.color||'var(--indigo)'}">${initials(c.nombre)}</div>
+        style="background:${isRealizado ? '#0D9488' : (etapa?.color||'var(--indigo)')}">
+        ${isRealizado ? '✅' : initials(c.nombre)}
+      </div>
       <div>
         <div class="contact-name">${escapeHTML(c.nombre)}</div>
         <div class="contact-email">${escapeHTML(c.email||'—')}</div>
@@ -1378,9 +1406,10 @@ function contactRowHTML(c) {
       <button class="icon-btn" onclick="openContactoModal('${c.id}')" title="Editar">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
       </button>
+      ${!isRealizado ? `
       <button class="icon-btn realizado" onclick="marcarRealizado('${c.id}')" title="Marcar como realizado">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-      </button>
+      </button>` : ''}
     </div></td>
   </tr>`;
 }
@@ -1391,13 +1420,29 @@ const filterFuente   = (f) => { S.filterFuente = f; contactos(); };
 /* ── 10. ACTIVIDADES ────────────────────────────────────────── */
 
 function actividades() {
-  const filt = S.filterActTipo;
-  const list = (filt ? S.actividades.filter(a => a.tipo === filt) : [...S.actividades])
+  const filt    = S.filterActTipo;
+  const todas   = (filt ? S.actividades.filter(a => a.tipo === filt) : [...S.actividades])
     .sort((a,b) => b.creadoEn - a.creadoEn);
+
+  const pendientes  = todas.filter(a => !a.realizado);
+  const realizadas  = todas.filter(a =>  a.realizado);
 
   const filterBtns = [['','Todas','🗂️'], ...Object.keys(ACT_ICONS).map(k => [k, ACT_LABELS[k], ACT_ICONS[k]])]
     .map(([id, lbl, icon]) => `<button class="filter-btn${filt===id?' active':''}" onclick="filterActTipo('${id}')">${icon} ${lbl}</button>`)
     .join('');
+
+  let realizadasHTML = '';
+  if (realizadas.length > 0) {
+    realizadasHTML = `
+    <div id="section-acts-realizadas" class="realizados-section">
+      <div class="realizados-header">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+        Realizados
+        <span class="badge badge-neutral" style="font-size:10px">${realizadas.length}</span>
+      </div>
+      <div class="activity-feed">${realizadas.map(actItemHTML).join('')}</div>
+    </div>`;
+  }
 
   document.getElementById('content').innerHTML = `
   <div class="view-header" style="margin-bottom:12px">
@@ -1411,27 +1456,31 @@ function actividades() {
     </div>
   </div>
   <div class="activity-filters">${filterBtns}</div>
-  ${list.length === 0
+  ${pendientes.length === 0 && realizadas.length === 0
     ? `<div class="empty"><div class="empty-icon">📋</div><p class="empty-title">Sin actividades</p><p class="empty-desc">Registra tu primera interacción.</p><button class="btn btn-primary" onclick="openActividadModal()">+ Actividad</button></div>`
-    : `<div class="activity-feed">${list.map(actItemHTML).join('')}</div>`
+    : `${pendientes.length > 0 ? `<div class="activity-feed">${pendientes.map(actItemHTML).join('')}</div>` : ''}
+       ${realizadasHTML}`
   }`;
 }
 
 function actItemHTML(a) {
   const c = getContacto(a.contactoId);
-  return `<div class="activity-item">
+  const esRealizado = !!a.realizado;
+  return `<div class="activity-item${esRealizado ? ' act-realizada' : ''}">
     <div class="act-icon" style="background:${ACT_BG[a.tipo]||'#f8f9fb'}">${ACT_ICONS[a.tipo]||'📌'}</div>
     <div class="act-body">
       <div class="act-meta">
         <span class="act-contact">${escapeHTML(c?.nombre||'Contacto eliminado')}</span>
         <span class="act-type">${ACT_LABELS[a.tipo]||a.tipo}</span>
         <span class="act-time">${timeAgo(a.creadoEn)}</span>
+        ${esRealizado ? `<span class="act-realizado-badge">✅ Realizado</span>` : ''}
       </div>
       <p class="act-desc">${escapeHTML(a.descripcion)}</p>
     </div>
-    <button class="icon-btn danger" onclick="deleteActividad('${a.id}')" title="Eliminar">
-      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-    </button>
+    ${!esRealizado ? `
+    <button class="icon-btn realizado" onclick="marcarActividadRealizada('${a.id}')" title="Marcar como realizado">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+    </button>` : ''}
   </div>`;
 }
 
@@ -1641,16 +1690,27 @@ function marcarRealizado(id) {
     contactoId:  id,
     descripcion: `✅ Gestión realizada con ${c.nombre}${c.empresa ? ' · ' + c.empresa : ''}.`,
     creadoEn:    now,
+    realizado:   true,
+    realizadoEn: now,
   });
 
-  // Actualizar timestamp del contacto
+  // Marcar el contacto como realizado y actualizar timestamp
+  c.realizado   = true;
+  c.realizadoEn = now;
   c.actualizadoEn = now;
 
   saveState();
   const _isAdminMR = AUTH.role === 'admin' || AUTH.role === 'ventas';
   if (S.view === 'contactos')  { _isAdminMR ? contactosAdmin()  : contactos();   }
   else if (S.view === 'actividades') { _isAdminMR ? actividadesAdmin() : actividades(); }
-  toast('Realizado', c.nombre, 'success');
+
+  // Scroll al apartado de realizados después del re-render
+  setTimeout(() => {
+    const sec = document.getElementById('section-contactos-realizados');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 150);
+
+  toast('✅ Realizado', c.nombre, 'success');
 }
 
 /* ── 14. MODAL — DEAL ──────────────────────────────────────── */
@@ -1827,6 +1887,22 @@ function deleteActividad(id) {
   toast('Eliminada', '', 'warn');
 }
 
+function marcarActividadRealizada(id) {
+  const a = S.actividades.find(x => x.id === id);
+  if (!a) return;
+  a.realizado   = true;
+  a.realizadoEn = Date.now();
+  saveState();
+  const _isAdminAR = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  _isAdminAR ? actividadesAdmin() : actividades();
+  // Scroll al apartado realizados
+  setTimeout(() => {
+    const sec = document.getElementById('section-acts-realizadas');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 150);
+  toast('✅ Realizado', '', 'success');
+}
+
 /* ── DEAL DRAWER — Panel lateral de actividades ────────────── */
 
 function openDealDrawer(dealId) {
@@ -1888,6 +1964,15 @@ function openDealDrawer(dealId) {
 function closeDealDrawer() {
   document.getElementById('deal-drawer').classList.remove('open');
   document.getElementById('drawer-backdrop').classList.remove('open');
+  // Restaurar footer si estaba en modo admin
+  const drawer = document.getElementById('deal-drawer');
+  if (drawer.dataset.adminMode === '1') {
+    drawer.dataset.adminMode = '';
+    const btnAct  = document.getElementById('drawer-btn-actividad');
+    const btnDeal = document.getElementById('drawer-btn-deal');
+    if (btnAct)  btnAct.style.display = '';
+    if (btnDeal) { btnDeal.textContent = 'Editar deal'; btnDeal.onclick = null; }
+  }
 }
 
 function drawerAddActividad() {
@@ -3149,6 +3234,10 @@ function pipelineAdmin() {
         <strong class="pipe-stat-val green">${fmtMXN(totalGanado)}</strong>
       </span>
     </div>
+    <button class="btn btn-primary" onclick="openDealModal()">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Nuevo deal
+    </button>
   </div>
   <div class="pipeline-phases-container">`;
 
@@ -3188,7 +3277,7 @@ function pipelineAdmin() {
             ${e.gate}
           </div>
           ${colValue>0?`<div class="col-value-row" style="color:${e.tc}">${fmtMXN(colValue)}</div>`:''}
-          <div class="kanban-cards" style="pointer-events:none">
+          <div class="kanban-cards">
             ${etapaDeals.map(d => dealCardAdminHTML(d, getC)).join('')}
           </div>
         </div>`;
@@ -3204,9 +3293,15 @@ function dealCardAdminHTML(d, getContactoFn) {
   const c    = getContactoFn(d.contactoId);
   const over = isOverdue(d.fechaLimite) && !['ganado','perdido'].includes(d.etapa);
   const vendedor = getProfileById('venta', d.vendedorId);
+  const vendedorId = d.vendedorId || null;
 
-  return `<div class="deal-card deal-card-readonly"
-    title="${escapeHTML(d.titulo)} — Solo lectura en vista admin">
+  return `<div class="deal-card"
+    data-id="${d.id}"
+    data-vendedor-id="${vendedorId || ''}"
+    onclick="openDealDrawerAdmin('${d.id}','${vendedorId || ''}')"
+    ondblclick="event.stopPropagation()"
+    title="Clic: ver actividades del prospecto"
+    style="cursor:pointer">
     ${vendedor ? `<div class="deal-vendedor-chip">
       <span style="font-size:13px">${vendedor.emoji}</span>
       <span>${escapeHTML(vendedor.nombre)}</span>
@@ -3221,6 +3316,77 @@ function dealCardAdminHTML(d, getContactoFn) {
       ${d.fechaLimite ? `<div class="deal-date${over?' overdue':''}">${over?'⚠️ ':''}${fmtDate(d.fechaLimite)}</div>` : ''}
     </div>
   </div>`;
+}
+
+/* ── Drawer admin: busca datos en el store del vendedor correcto ── */
+function openDealDrawerAdmin(dealId, vendedorId) {
+  // Obtener datos del vendedor correspondiente o del global
+  const data = vendedorId ? getVendedorData(vendedorId) : getDataParaVista(null);
+  const d    = data.deals.find(x => x.id === dealId);
+  if (!d) return;
+
+  const allContactos = [...data.contactos, ...S.contactos];
+  const c = allContactos.find(x => x.id === d.contactoId);
+  const e = getEtapa(d.etapa);
+
+  // Header
+  document.getElementById('drawer-deal-title').textContent = d.titulo;
+  document.getElementById('drawer-deal-meta').innerHTML = `
+    <span class="badge" style="background:${e.bg};color:${e.tc};font-size:10px">${e.emoji} ${e.label}</span>
+    ${c ? `<span style="font-size:11px;color:var(--n-500)">· ${escapeHTML(c.nombre)}</span>` : ''}
+    ${vendedorId ? (() => {
+      const vp = getProfileById('venta', vendedorId);
+      return vp ? `<span style="font-size:11px;color:var(--n-500)">· ${vp.emoji} ${vp.nombre}</span>` : '';
+    })() : ''}`;
+
+  // Stats
+  const over = isOverdue(d.fechaLimite) && !['ganado','perdido'].includes(d.etapa);
+  document.getElementById('drawer-deal-stats').innerHTML = `
+    <div class="drawer-stat">
+      <div class="drawer-stat-val">${fmtMXN(d.valor)}</div>
+      <div class="drawer-stat-lbl">Valor</div>
+    </div>
+    <div class="drawer-stat">
+      <div class="drawer-stat-val" style="${over ? 'color:var(--error)' : ''}">${d.fechaLimite ? fmtDate(d.fechaLimite) : '—'}</div>
+      <div class="drawer-stat-lbl">Fecha límite</div>
+    </div>
+    <div class="drawer-stat">
+      <div class="drawer-stat-val" style="font-size:12px;color:var(--n-600)">${d.proximaAccion ? escapeHTML(d.proximaAccion.slice(0,22))+(d.proximaAccion.length>22?'…':'') : '—'}</div>
+      <div class="drawer-stat-lbl">Próxima acción</div>
+    </div>`;
+
+  // Actividades del contacto dentro del store del vendedor
+  const acts = c ? data.actividades.filter(a => a.contactoId === c.id).sort((x,y) => y.creadoEn - x.creadoEn) : [];
+  document.getElementById('drawer-act-count').textContent = acts.length;
+
+  document.getElementById('drawer-act-list').innerHTML = acts.length === 0
+    ? `<div class="drawer-empty">
+        <div class="drawer-empty-icon">📋</div>
+        Sin actividades para este contacto.
+       </div>`
+    : acts.map(a => `
+        <div class="drawer-act-item">
+          <div class="drawer-act-icon" style="background:${ACT_BG[a.tipo]||'#f8f9fb'}">${ACT_ICONS[a.tipo]||'📌'}</div>
+          <div class="drawer-act-body">
+            <div class="drawer-act-tipo">${ACT_LABELS[a.tipo]||a.tipo}</div>
+            <div class="drawer-act-desc">${escapeHTML(a.descripcion)}</div>
+            <div class="drawer-act-time">${timeAgo(a.creadoEn)}</div>
+          </div>
+        </div>`).join('');
+
+  // Guardar referencia — modo lectura para admin
+  const drawer = document.getElementById('deal-drawer');
+  drawer.dataset.dealId      = dealId;
+  drawer.dataset.contactoId  = d.contactoId || '';
+  drawer.dataset.adminMode   = '1';
+
+  // Footer en modo lectura (sin editar)
+  document.getElementById('drawer-btn-actividad').style.display = 'none';
+  document.getElementById('drawer-btn-deal').textContent = 'Cerrar';
+  document.getElementById('drawer-btn-deal').onclick = closeDealDrawer;
+
+  drawer.classList.add('open');
+  document.getElementById('drawer-backdrop').classList.add('open');
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -3243,6 +3409,7 @@ function contactosAdmin() {
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         CSV
       </button>
+      <button class="btn btn-primary" onclick="openContactoModal()">+ Contacto</button>
     </div>
   </div>`;
 
@@ -3304,39 +3471,108 @@ function actividadesAdmin() {
   const allC  = [...data.contactos, ...S.contactos];
   const getC  = (id) => allC.find(c => c.id === id);
 
+  const pendientes = list.filter(a => !a.realizado);
+  const realizadas = list.filter(a =>  a.realizado);
+
   let html = renderVendedorSelectorHTML('actividades');
 
   html += `
   <div class="view-header" style="margin-bottom:12px">
     <span class="badge badge-neutral">${list.length} registros</span>
-    <button class="btn btn-ghost btn-sm" onclick="exportCSVAdmin('actividades')">
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      CSV
-    </button>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="exportCSVAdmin('actividades')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        CSV
+      </button>
+      <button class="btn btn-primary" onclick="openActividadModal()">+ Actividad</button>
+    </div>
   </div>`;
 
-  if (list.length === 0) {
+  if (pendientes.length === 0 && realizadas.length === 0) {
     html += `<div class="empty"><div class="empty-icon">📋</div><p class="empty-title">Sin actividades</p><p class="empty-desc">Este vendedor aún no tiene actividades registradas.</p></div>`;
   } else {
-    html += `<div class="activity-feed">`;
-    list.forEach(a => {
-      const c = getC(a.contactoId);
-      html += `<div class="activity-item">
-        <div class="act-icon" style="background:${ACT_BG[a.tipo]||'#f8f9fb'}">${ACT_ICONS[a.tipo]||'📌'}</div>
-        <div class="act-body">
-          <div class="act-meta">
-            <span class="act-contact">${escapeHTML(c?.nombre||'Contacto eliminado')}</span>
-            <span class="act-type">${ACT_LABELS[a.tipo]||a.tipo}</span>
-            <span class="act-time">${timeAgo(a.creadoEn)}</span>
+    // Pendientes
+    if (pendientes.length > 0) {
+      html += `<div class="activity-feed">`;
+      pendientes.forEach(a => {
+        const c = getC(a.contactoId);
+        const vId = VISTA_VENDEDOR.vendedorId || '';
+        html += `<div class="activity-item">
+          <div class="act-icon" style="background:${ACT_BG[a.tipo]||'#f8f9fb'}">${ACT_ICONS[a.tipo]||'📌'}</div>
+          <div class="act-body">
+            <div class="act-meta">
+              <span class="act-contact">${escapeHTML(c?.nombre||'Contacto eliminado')}</span>
+              <span class="act-type">${ACT_LABELS[a.tipo]||a.tipo}</span>
+              <span class="act-time">${timeAgo(a.creadoEn)}</span>
+            </div>
+            <p class="act-desc">${escapeHTML(a.descripcion)}</p>
           </div>
-          <p class="act-desc">${escapeHTML(a.descripcion)}</p>
+          <button class="icon-btn realizado" onclick="marcarActividadRealizadaAdmin('${a.id}','${vId}')" title="Marcar como realizado">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+        </div>`;
+      });
+      html += `</div>`;
+    }
+
+    // Realizadas
+    if (realizadas.length > 0) {
+      html += `
+      <div id="section-acts-realizadas-admin" class="realizados-section" style="margin-top:24px">
+        <div class="realizados-header">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          Realizados
+          <span class="badge badge-neutral" style="font-size:10px">${realizadas.length}</span>
         </div>
-      </div>`;
-    });
-    html += `</div>`;
+        <div class="activity-feed">`;
+      realizadas.forEach(a => {
+        const c = getC(a.contactoId);
+        html += `<div class="activity-item act-realizada">
+          <div class="act-icon" style="background:${ACT_BG[a.tipo]||'#f8f9fb'}">${ACT_ICONS[a.tipo]||'📌'}</div>
+          <div class="act-body">
+            <div class="act-meta">
+              <span class="act-contact">${escapeHTML(c?.nombre||'Contacto eliminado')}</span>
+              <span class="act-type">${ACT_LABELS[a.tipo]||a.tipo}</span>
+              <span class="act-time">${timeAgo(a.creadoEn)}</span>
+              <span class="act-realizado-badge">✅ Realizado</span>
+            </div>
+            <p class="act-desc">${escapeHTML(a.descripcion)}</p>
+          </div>
+        </div>`;
+      });
+      html += `</div></div>`;
+    }
   }
 
   document.getElementById('content').innerHTML = html;
+}
+
+/* ── Marcar actividad realizada desde vista admin ── */
+function marcarActividadRealizadaAdmin(actId, vendedorId) {
+  let encontrado = false;
+  if (vendedorId) {
+    const vd = getVendedorData(vendedorId);
+    const a  = (vd.actividades || []).find(x => x.id === actId);
+    if (a) { a.realizado = true; a.realizadoEn = Date.now(); saveVendedorData(vendedorId, vd); encontrado = true; }
+  }
+  if (!encontrado) {
+    const vendedores = getProfiles()['venta'] || [];
+    for (const v of vendedores) {
+      const vd = getVendedorData(v.id);
+      const a  = (vd.actividades || []).find(x => x.id === actId);
+      if (a) { a.realizado = true; a.realizadoEn = Date.now(); saveVendedorData(v.id, vd); encontrado = true; break; }
+    }
+  }
+  if (!encontrado) {
+    const a = S.actividades.find(x => x.id === actId);
+    if (a) { a.realizado = true; a.realizadoEn = Date.now(); saveState(); }
+  }
+  actividadesAdmin();
+  setTimeout(() => {
+    const sec = document.getElementById('section-acts-realizadas-admin');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 150);
+  toast('✅ Realizado', '', 'success');
 }
 
 /* ── Exportar CSV de vista admin ── */
