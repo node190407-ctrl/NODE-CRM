@@ -1,5 +1,24 @@
 'use strict';
 
+const SUPABASE_URL      = 'https://TU_PROYECTO.supabase.co';
+const SUPABASE_ANON_KEY = 'TU_ANON_KEY_AQUI';
+const _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+async function sbGet(key) {
+  try {
+    const { data, error } = await _sb.from('crm_store').select('value').eq('key', key).maybeSingle();
+    if (error) throw error;
+    return data ? data.value : null;
+  } catch(e) { console.warn('[Supabase] sbGet error:', key, e); return null; }
+}
+
+async function sbSet(key, value) {
+  try {
+    const { error } = await _sb.from('crm_store').upsert({ key, value }, { onConflict: 'key' });
+    if (error) throw error;
+  } catch(e) { console.warn('[Supabase] sbSet error:', key, e); }
+}
+
 /* ═══════════════════════════════════════════════════════════════
    AUTH — Autenticación con roles (Admin / Ventas)
    ═══════════════════════════════════════════════════════════════ */
@@ -35,16 +54,14 @@ function notifKey(destinatario) {
 }
 
 /** Leer notificaciones de un buzón específico */
-function getNotifDe(destinatario) {
-  try { return JSON.parse(localStorage.getItem(notifKey(destinatario)) || '[]'); }
-  catch { return []; }
+async function getNotifDe(destinatario) {
+  const data = await sbGet(notifKey(destinatario));
+  return Array.isArray(data) ? data : [];
 }
 
-/** Guardar notificaciones en un buzón específico */
-function saveNotifDe(destinatario, lista) {
-  localStorage.setItem(notifKey(destinatario), JSON.stringify(lista));
+async function saveNotifDe(destinatario, lista) {
+  await sbSet(notifKey(destinatario), lista);
 }
-
 /**
  * Acumula una notificación en los buzones correctos según las reglas:
  *  - ADMIN:  recibe TODAS las notificaciones de todos los perfiles
@@ -55,7 +72,7 @@ function saveNotifDe(destinatario, lista) {
  * @param {object} datos
  * @param {object|null} perfilOrigen  — perfil que generó la alerta (vendedor)
  */
-function acumularNotificacionSegmentada(tipo, datos, perfilOrigen) {
+async function acumularNotificacionSegmentada(tipo, datos, perfilOrigen) {
   const id       = 'n' + Date.now() + Math.random().toString(36).slice(2, 6);
   const notif    = { id, tipo, datos, perfil: perfilOrigen || null, ts: Date.now(), enviada: false };
 
@@ -75,12 +92,12 @@ function acumularNotificacionSegmentada(tipo, datos, perfilOrigen) {
   //    (si tipo === 'prospecto_nuevo' no hay perfil de vendedor individual)
 
   // Guardar en cada buzón
-  destinatarios.forEach(dest => {
-    const lista = getNotifDe(dest);
-    lista.unshift(notif);
-    if (lista.length > 100) lista.length = 100;
-    saveNotifDe(dest, lista);
-  });
+for (const dest of destinatarios) {
+  const lista = await getNotifDe(dest);
+  lista.unshift(notif);
+  if (lista.length > 100) lista.length = 100;
+  await saveNotifDe(dest, lista);
+}
 
   // Actualizar badge si el usuario logueado tiene notificaciones nuevas
   actualizarBadge();
@@ -114,18 +131,14 @@ function vendedorDataKey(profileId) {
   return 'node_venta_data_' + profileId;
 }
 
-function getVendedorData(profileId) {
-  try {
-    const raw = localStorage.getItem(vendedorDataKey(profileId));
-    if (!raw) return { contactos: [], deals: [], actividades: [] };
-    return JSON.parse(raw);
-  } catch { return { contactos: [], deals: [], actividades: [] }; }
+async function getVendedorData(profileId) {
+  const data = await sbGet(vendedorDataKey(profileId));
+  return data || { contactos: [], deals: [], actividades: [] };
 }
 
-function saveVendedorData(profileId, data) {
-  localStorage.setItem(vendedorDataKey(profileId), JSON.stringify(data));
+async function saveVendedorData(profileId, data) {
+  await sbSet(vendedorDataKey(profileId), data);
 }
-
 /* ── Perfiles por rol (fijos ahora, editables en el futuro desde configuración) ── */
 const DEFAULT_PROFILES = {
   admin: [
@@ -149,12 +162,10 @@ const DEFAULT_PROFILES = {
 };
 
 /* ── Perfiles: leer y guardar ── */
-function getProfiles() {
+async function getProfiles() {
   try {
-    const raw = localStorage.getItem(AUTH_PROFILES_KEY);
-    if (!raw) return JSON.parse(JSON.stringify(DEFAULT_PROFILES)); // deep copy
-    const saved = JSON.parse(raw);
-    // Merge: usa datos guardados pero respeta estructura base
+    const saved = await sbGet(AUTH_PROFILES_KEY);
+    if (!saved) return JSON.parse(JSON.stringify(DEFAULT_PROFILES));
     const result = JSON.parse(JSON.stringify(DEFAULT_PROFILES));
     Object.keys(result).forEach(role => {
       if (saved[role]) {
@@ -168,10 +179,9 @@ function getProfiles() {
   } catch { return JSON.parse(JSON.stringify(DEFAULT_PROFILES)); }
 }
 
-function saveProfiles(profiles) {
-  localStorage.setItem(AUTH_PROFILES_KEY, JSON.stringify(profiles));
+async function saveProfiles(profiles) {
+  await sbSet(AUTH_PROFILES_KEY, profiles);
 }
-
 function getProfileById(role, profileId) {
   return getProfiles()[role]?.find(p => p.id === profileId) || null;
 }
@@ -179,16 +189,16 @@ function getProfileById(role, profileId) {
 const DEFAULT_PWD = { admin: 'admin', ventas: 'ventas', venta: 'venta' };
 
 /* ── Contraseñas de rol (legacy — ya no se usan para login pero se mantienen) ── */
-function getPasswords() {
+async function getPasswords() {
   try {
-    const raw = localStorage.getItem(AUTH_PASSWORDS_KEY);
-    return raw ? { ...DEFAULT_PWD, ...JSON.parse(raw) } : { ...DEFAULT_PWD };
+    const raw = await sbGet(AUTH_PASSWORDS_KEY);
+    return raw ? { ...DEFAULT_PWD, ...raw } : { ...DEFAULT_PWD };
   } catch { return { ...DEFAULT_PWD }; }
 }
-function persistPasswords(admin, ventas, venta) {
-  localStorage.setItem(AUTH_PASSWORDS_KEY, JSON.stringify({ admin, ventas, venta }));
-}
 
+async function persistPasswords(admin, ventas, venta) {
+  await sbSet(AUTH_PASSWORDS_KEY, { admin, ventas, venta });
+}
 /* ── Sesión (sessionStorage: se limpia al cerrar la pestaña) ── */
 function restoreSession() {
   try {
@@ -586,43 +596,48 @@ const S = {
 
 /* ── 3. PERSISTENCIA ───────────────────────────────────────── */
 
-function saveState() {
+async function saveState() {
   try {
-    // Si es un vendedor (venta), guardar en su espacio personal
     if (AUTH.role === 'venta' && AUTH.profileId) {
-      saveVendedorData(AUTH.profileId, {
+      await saveVendedorData(AUTH.profileId, {
         contactos:   S.contactos,
         deals:       S.deals,
         actividades: S.actividades,
       });
-      // config siempre en el store global
-      const global = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...global, config: S.config }));
+      const global = await sbGet(STORAGE_KEY) || {};
+      await sbSet(STORAGE_KEY, { ...global, config: S.config });
     } else {
-      // Admin, director — store global compartido
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      await sbSet(STORAGE_KEY, {
         contactos:   S.contactos,
         deals:       S.deals,
         actividades: S.actividades,
         config:      S.config,
-      }));
+      });
     }
   } catch(e) { console.warn('Storage write error:', e); }
 }
 
-function loadState() {
+async function loadState() {
   try {
     if (AUTH.role === 'venta' && AUTH.profileId) {
-      // Vendedor: cargar sus datos privados
-      const vd = getVendedorData(AUTH.profileId);
+      const vd = await getVendedorData(AUTH.profileId);
       S.contactos   = vd.contactos   || [];
       S.deals       = vd.deals       || [];
       S.actividades = vd.actividades || [];
-      // Config del global
-      const global = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      const global = await sbGet(STORAGE_KEY) || {};
       S.config = Object.assign({}, S.config, global.config || {});
       return true;
     } else {
+      const d = await sbGet(STORAGE_KEY);
+      if (!d) return false;
+      S.contactos   = d.contactos   || [];
+      S.deals       = d.deals       || [];
+      S.actividades = d.actividades || [];
+      S.config      = Object.assign({}, S.config, d.config || {});
+      return true;
+    }
+  } catch(e) { return false; }
+}
       // Admin, director — store global compartido
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return false;
@@ -2797,14 +2812,14 @@ function guardarMiPerfil() {
  *  - Cada vendedor (venta) solo ve alertas de SUS deals
  * Se llama al cargar el CRM y cada 30 minutos.
  */
-function checkNotificaciones() {
+async function checkNotificaciones() {
   const ahora    = Date.now();
   const MS_DIA   = 86_400_000;
   const etapasIgnorar = ['ganado', 'perdido'];
 
   // Clave única por día para evitar duplicados
   const HOY_KEY  = 'node_notif_check_' + new Date().toISOString().slice(0, 10);
-  let   enviados = JSON.parse(localStorage.getItem(HOY_KEY) || '[]');
+ let   enviados = await sbGet(HOY_KEY) || [];
 
   // Determinar qué deals revisar:
   // - admin/ventas: todos los deals globales (S.deals ya los tiene)
@@ -2913,7 +2928,7 @@ function checkNotificaciones() {
     });
   }
 
-  localStorage.setItem(HOY_KEY, JSON.stringify(enviados));
+  await sbSet(HOY_KEY, enviados);
 }
 /* ── VISTA: FORMULARIO DE PROSPECTO ────────────────────────── */
 function prospectoForm() {
