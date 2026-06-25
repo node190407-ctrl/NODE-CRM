@@ -1,6 +1,6 @@
 'use strict';
 
-const SUPABASE_URL      = 'https://uoacfsdyhlcsvcjdqycl.supabase.co/rest/v1/';
+const SUPABASE_URL      = 'https://uoacfsdyhlcsvcjdqycl.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVvYWNmc2R5aGxjc3ZjamRxeWNsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI0MTg2OTgsImV4cCI6MjA5Nzk5NDY5OH0.1X5FDJMUikuWOputNOYYhLBCr7BqHv_dlT7f_nrY8XM';
 const _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
