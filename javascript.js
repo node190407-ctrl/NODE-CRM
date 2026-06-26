@@ -1663,7 +1663,12 @@ function saveContacto() {
     if (i >= 0) S.contactos[i] = { ...S.contactos[i], ...data };
     toast('Actualizado', nombre, 'success');
   } else {
-    S.contactos.push({ id:'c'+uid(), creadoEn:now, ...data });
+    // Guardar quién agregó el contacto
+    const agregadoPor = {
+      role:      AUTH.role,
+      profileId: AUTH.profileId,
+    };
+    S.contactos.push({ id:'c'+uid(), creadoEn:now, agregadoPor, ...data });
     toast('Contacto creado', nombre, 'success');
   }
 
@@ -3119,10 +3124,12 @@ async function getAllVendedoresData() {
 /* ── Obtener datos de un vendedor específico o del global ── */
 async function getDataParaVista(vendedorId) {
   if (!vendedorId) {
-    // Vista global: mezclar todos los vendedores
+    // Vista global: mezclar todos los vendedores, marcando el origen de cada contacto
     const todos = await getAllVendedoresData();
     return {
-      contactos:   todos.flatMap(v => v.contactos),
+      contactos: todos.flatMap(v =>
+        v.contactos.map(c => ({ ...c, _perfilOrigen: v.perfil }))
+      ),
       deals:       todos.flatMap(v => v.deals),
       actividades: todos.flatMap(v => v.actividades),
     };
@@ -3436,11 +3443,15 @@ async function _contactosAdminAsync() {
   if (list.length === 0) {
     html += `<div class="empty"><div class="empty-icon">👥</div><p class="empty-title">Sin contactos</p><p class="empty-desc">Este vendedor aún no tiene contactos registrados.</p></div>`;
   } else {
+    const mostrarColumnaOrigen = !VISTA_VENDEDOR.vendedorId; // solo en vista "Todos"
+
     html += `<div class="contacts-table-wrap">
       <table class="contacts-table">
         <thead><tr>
           <th>Contacto</th><th>Empresa</th><th>Fuente</th>
-          <th>Monto est.</th><th>Etapa actual</th><th>Actualización</th>
+          <th>Monto est.</th><th>Etapa actual</th>
+          ${mostrarColumnaOrigen ? '<th>Agregado por</th>' : ''}
+          <th>Actualización</th>
         </tr></thead>
         <tbody>`;
 
@@ -3449,10 +3460,28 @@ async function _contactosAdminAsync() {
       const dealAct  = cDeals.find(d => d.etapa !== 'perdido') || cDeals[0];
       const etapa    = dealAct ? getEtapa(dealAct.etapa) : null;
 
-      // Vendedor asignado
-      const vendedorPerfil = VISTA_VENDEDOR.vendedorId
-        ? getProfileById('venta', VISTA_VENDEDOR.vendedorId)
-        : (dealAct?.vendedorId ? getProfileById('venta', dealAct.vendedorId) : null);
+      // Resolver perfil de quien agregó el contacto
+      // Prioridad: _perfilOrigen (inyectado en vista global) > agregadoPor > dealAct.vendedorId
+      let perfilAgregador = null;
+      if (c._perfilOrigen) {
+        perfilAgregador = c._perfilOrigen;
+      } else if (c.agregadoPor?.profileId) {
+        perfilAgregador = getProfileById(c.agregadoPor.role, c.agregadoPor.profileId);
+      } else if (dealAct?.vendedorId) {
+        perfilAgregador = getProfileById('venta', dealAct.vendedorId);
+      } else if (VISTA_VENDEDOR.vendedorId) {
+        perfilAgregador = getProfileById('venta', VISTA_VENDEDOR.vendedorId);
+      }
+
+      const agregadorHTML = perfilAgregador
+        ? `<div style="display:flex;align-items:center;gap:6px">
+             <div style="width:26px;height:26px;border-radius:50%;background:var(--indigo);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${perfilAgregador.emoji}</div>
+             <div>
+               <div style="font-size:12px;font-weight:600;color:var(--ink);line-height:1.2">${escapeHTML(perfilAgregador.nombre)}</div>
+               <div style="font-size:10px;color:var(--n-500);line-height:1.2">${escapeHTML(perfilAgregador.cargo)}</div>
+             </div>
+           </div>`
+        : `<span style="font-size:12px;color:var(--n-400)">—</span>`;
 
       html += `<tr>
         <td><div class="contact-row-name">
@@ -3465,12 +3494,10 @@ async function _contactosAdminAsync() {
           </div>
         </div></td>
         <td style="font-size:13px;color:var(--n-600)">${escapeHTML(c.empresa||'—')}</td>
-        <td>
-          <span class="badge badge-indigo">${escapeHTML(c.fuente||'—')}</span>
-          ${vendedorPerfil ? `<span class="badge" style="background:var(--n-100);color:var(--n-700);margin-left:4px;font-size:10px">${vendedorPerfil.emoji} ${vendedorPerfil.nombre.split(' ')[0]}</span>` : ''}
-        </td>
+        <td><span class="badge badge-indigo">${escapeHTML(c.fuente||'—')}</span></td>
         <td class="money" style="font-size:13px">${fmtMXN(c.monto)}</td>
         <td>${etapa ? `<span class="badge" style="background:${etapa.bg};color:${etapa.tc};border:1px solid ${etapa.color}33">${etapa.emoji} ${etapa.label}</span>` : '<span class="badge badge-neutral">Sin deal</span>'}</td>
+        ${mostrarColumnaOrigen ? `<td>${agregadorHTML}</td>` : ''}
         <td style="font-size:12px;color:var(--n-500)">${timeAgo(c.actualizadoEn)}</td>
       </tr>`;
     });
