@@ -138,6 +138,8 @@ async function getVendedorData(profileId) {
 
 async function saveVendedorData(profileId, data) {
   await sbSet(vendedorDataKey(profileId), data);
+  // Invalidar caché admin para que las vistas reflejen los cambios
+  if (typeof invalidarCacheAdmin === 'function') invalidarCacheAdmin();
 }
 
 /* ── Perfiles por rol (fijos ahora, editables en el futuro desde configuración) ── */
@@ -623,6 +625,8 @@ async function saveState() {
         config:      S.config,
       });
     }
+    // Invalidar caché para que las vistas admin reflejen los cambios
+    if (typeof invalidarCacheAdmin === 'function') invalidarCacheAdmin();
   } catch(e) { console.warn('Storage write error:', e); }
 }
 
@@ -3101,8 +3105,27 @@ const VISTA_VENDEDOR = {
   seccion:     'pipeline', // pipeline | contactos | actividades
 };
 
+/* ══════════════════════════════════════════════════════════════
+   CACHÉ EN MEMORIA — evita llamadas repetidas a Supabase
+   Se invalida con invalidarCacheAdmin() cada vez que se guarda.
+   ══════════════════════════════════════════════════════════════ */
+const _ADMIN_CACHE = {
+  todosData:    null,  // resultado de getAllVendedoresData
+  globalData:   null,  // resultado de sbGet(STORAGE_KEY)
+  mergedGlobal: null,  // combinado para vista "Todos"
+  vendedores:   {},    // caché por vendedorId individual
+};
+
+function invalidarCacheAdmin() {
+  _ADMIN_CACHE.todosData    = null;
+  _ADMIN_CACHE.globalData   = null;
+  _ADMIN_CACHE.mergedGlobal = null;
+  _ADMIN_CACHE.vendedores   = {};
+}
+
 /* ── Obtener todos los datos agregados de todos los vendedores ── */
 async function getAllVendedoresData() {
+  if (_ADMIN_CACHE.todosData) return _ADMIN_CACHE.todosData;
   const vendedores = DEFAULT_PROFILES['venta'] || [];
   const results = await Promise.all(vendedores.map(async v => {
     const data = await getVendedorData(v.id);
@@ -3113,21 +3136,27 @@ async function getAllVendedoresData() {
       actividades: data.actividades || [],
     };
   }));
+  _ADMIN_CACHE.todosData = results;
   return results;
 }
 
 /* ── Obtener datos de un vendedor específico o del global ── */
 async function getDataParaVista(vendedorId) {
   if (!vendedorId) {
-    // Vista global: mezclar todos los vendedores + datos propios de admin/ventas
-    const todos = await getAllVendedoresData();
-    // Incluir los contactos/deals/actividades guardados por admin y director de ventas
-    const globalData = await sbGet(STORAGE_KEY) || {};
+    if (_ADMIN_CACHE.mergedGlobal) return _ADMIN_CACHE.mergedGlobal;
+
+    // Hacer ambas llamadas en paralelo para reducir latencia
+    const [todos, globalData] = await Promise.all([
+      getAllVendedoresData(),
+      _ADMIN_CACHE.globalData
+        ? Promise.resolve(_ADMIN_CACHE.globalData)
+        : sbGet(STORAGE_KEY).then(d => { _ADMIN_CACHE.globalData = d || {}; return _ADMIN_CACHE.globalData; }),
+    ]);
+
     const globalContactos   = globalData.contactos   || [];
     const globalDeals       = globalData.deals       || [];
     const globalActividades = globalData.actividades || [];
 
-    // Deduplicar por id para evitar duplicados si S ya tiene los mismos datos
     const vendedorContactos   = todos.flatMap(v => v.contactos);
     const vendedorDeals       = todos.flatMap(v => v.deals);
     const vendedorActividades = todos.flatMap(v => v.actividades);
@@ -3136,13 +3165,18 @@ async function getDataParaVista(vendedorId) {
     const vendedorDIds = new Set(vendedorDeals.map(d => d.id));
     const vendedorAIds = new Set(vendedorActividades.map(a => a.id));
 
-    return {
+    _ADMIN_CACHE.mergedGlobal = {
       contactos:   [...vendedorContactos,   ...globalContactos.filter(c => !vendedorCIds.has(c.id))],
       deals:       [...vendedorDeals,       ...globalDeals.filter(d => !vendedorDIds.has(d.id))],
       actividades: [...vendedorActividades, ...globalActividades.filter(a => !vendedorAIds.has(a.id))],
     };
+    return _ADMIN_CACHE.mergedGlobal;
   }
-  return await getVendedorData(vendedorId);
+
+  if (_ADMIN_CACHE.vendedores[vendedorId]) return _ADMIN_CACHE.vendedores[vendedorId];
+  const data = await getVendedorData(vendedorId);
+  _ADMIN_CACHE.vendedores[vendedorId] = data;
+  return data;
 }
 
 /* ── Render del selector de vendedor (tabs) ── */
@@ -3150,10 +3184,11 @@ async function renderVendedorSelectorHTML(seccionActiva) {
   const vendedores = DEFAULT_PROFILES['venta'] || [];
   const sel        = VISTA_VENDEDOR.vendedorId;
 
-  const tabsWithCounts = await Promise.all(vendedores.map(async v => {
-    const d = await getVendedorData(v.id);
-    const activos = (d.deals || []).filter(x => !['ganado','perdido'].includes(x.etapa)).length;
-    return { v, activos };
+  // Reutilizar caché de getAllVendedoresData en lugar de hacer 3 llamadas separadas
+  const todosCache = await getAllVendedoresData();
+  const tabsWithCounts = todosCache.map(v => ({
+    v: v.perfil,
+    activos: (v.deals || []).filter(x => !['ganado','perdido'].includes(x.etapa)).length,
   }));
 
   const tabs = [
@@ -3659,19 +3694,12 @@ async function _dashboardAdminAsync() {
   const semanaAgo = Date.now() - 7 * 86_400_000;
   const actsWeek  = allActs.filter(a => a.creadoEn >= semanaAgo).length;
 
-  // Cargar los datos globales en S.deals / S.actividades para que buildCharts() los use
-  // (solo lectura — no se persiste, se reemplaza al cambiar de vista)
-  // Incluir también los contactos/deals/actividades propios de admin/ventas (store global)
-  const _globalRaw = await sbGet(STORAGE_KEY) || {};
-  const _globalContactos   = _globalRaw.contactos   || [];
-  const _globalDeals       = _globalRaw.deals       || [];
-  const _globalActividades = _globalRaw.actividades || [];
-  const _vendedorCIds = new Set(todosData.flatMap(v => v.contactos).map(c => c.id));
-  const _vendedorDIds = new Set(allDeals.map(d => d.id));
-  const _vendedorAIds = new Set(allActs.map(a => a.id));
-  S.deals       = [...allDeals,                   ..._globalDeals.filter(d => !_vendedorDIds.has(d.id))];
-  S.actividades = [...allActs,                    ..._globalActividades.filter(a => !_vendedorAIds.has(a.id))];
-  S.contactos   = [...todosData.flatMap(v => v.contactos), ..._globalContactos.filter(c => !_vendedorCIds.has(c.id))];
+  // Cargar los datos globales en S usando el caché (evita llamada extra a Supabase)
+  // getDataParaVista(null) ya combina vendedores + store global, con caché en memoria
+  const _mergedAll = await getDataParaVista(null);
+  S.deals       = _mergedAll.deals;
+  S.actividades = _mergedAll.actividades;
+  S.contactos   = _mergedAll.contactos;
 
   // Actividades recientes y top deals globales para los paneles inferiores
   const recentActs = [...allActs].sort((a,b) => b.creadoEn - a.creadoEn).slice(0, 5);
