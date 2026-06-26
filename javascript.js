@@ -53,14 +53,53 @@ function notifKey(destinatario) {
   return 'node_notif_' + destinatario;
 }
 
-/** Leer notificaciones de un buzón específico */
+/* ── Cache de notificaciones en memoria ── */
+let _notifCache = {}; // { [destinatario]: [notif...] }
+
+/** Leer notificaciones de un buzón (async, actualiza caché) */
 async function getNotifDe(destinatario) {
   const data = await sbGet(notifKey(destinatario));
-  return Array.isArray(data) ? data : [];
+  const result = Array.isArray(data) ? data : [];
+  _notifCache[destinatario] = result;
+  return result;
+}
+
+/** Leer notificaciones síncronamente desde caché */
+function getNotifDeSync(destinatario) {
+  return Array.isArray(_notifCache[destinatario]) ? _notifCache[destinatario] : [];
 }
 
 async function saveNotifDe(destinatario, lista) {
+  _notifCache[destinatario] = lista; // actualizar caché
   await sbSet(notifKey(destinatario), lista);
+}
+
+/** Obtener buzón del usuario ACTUALMENTE logueado (síncrono, usa caché) */
+function getNotifDelUsuarioActual() {
+  const role      = AUTH.role;
+  const profileId = AUTH.profileId;
+  if (role === 'admin')  return getNotifDeSync('admin');
+  if (role === 'ventas') return getNotifDeSync('ventas');
+  if (role === 'venta')  return getNotifDeSync('venta_' + profileId);
+  return [];
+}
+
+/** Guardar buzón del usuario actualmente logueado */
+function saveNotifDelUsuarioActual(lista) {
+  const role      = AUTH.role;
+  const profileId = AUTH.profileId;
+  if (role === 'admin')  saveNotifDe('admin',  lista);
+  if (role === 'ventas') saveNotifDe('ventas', lista);
+  if (role === 'venta')  saveNotifDe('venta_' + profileId, lista);
+}
+
+/** Precargar notificaciones del usuario actual al caché */
+async function precargarNotifUsuario() {
+  const role      = AUTH.role;
+  const profileId = AUTH.profileId;
+  if (role === 'admin')  await getNotifDe('admin');
+  if (role === 'ventas') await getNotifDe('ventas');
+  if (role === 'venta')  await getNotifDe('venta_' + profileId);
 }
 /**
  * Acumula una notificación en los buzones correctos según las reglas:
@@ -103,25 +142,6 @@ async function acumularNotificacionSegmentada(tipo, datos, perfilOrigen) {
   actualizarBadge();
 }
 
-/** Obtener buzón del usuario ACTUALMENTE logueado */
-function getNotifDelUsuarioActual() {
-  const role      = AUTH.role;
-  const profileId = AUTH.profileId;
-  if (role === 'admin')  return getNotifDe('admin');
-  if (role === 'ventas') return getNotifDe('ventas');
-  if (role === 'venta')  return getNotifDe('venta_' + profileId);
-  return [];
-}
-
-/** Guardar buzón del usuario actualmente logueado */
-function saveNotifDelUsuarioActual(lista) {
-  const role      = AUTH.role;
-  const profileId = AUTH.profileId;
-  if (role === 'admin')  saveNotifDe('admin',  lista);
-  if (role === 'ventas') saveNotifDe('ventas', lista);
-  if (role === 'venta')  saveNotifDe('venta_' + profileId, lista);
-}
-
 /* ── DATOS DE VENTA: cada vendedor tiene su propio espacio ─── */
 /**
  * Clave de datos por perfil de vendedor.
@@ -136,8 +156,30 @@ async function getVendedorData(profileId) {
   return data || { contactos: [], deals: [], actividades: [] };
 }
 
+/* ── Cache de datos de vendedores (para uso síncrono) ── */
+let _vendedoresCache = {}; // { [profileId]: { contactos, deals, actividades } }
+
+async function getVendedorData(profileId) {
+  const data = await sbGet(vendedorDataKey(profileId));
+  const result = data || { contactos: [], deals: [], actividades: [] };
+  _vendedoresCache[profileId] = result; // actualizar caché
+  return result;
+}
+
 async function saveVendedorData(profileId, data) {
+  _vendedoresCache[profileId] = data; // actualizar caché inmediatamente
   await sbSet(vendedorDataKey(profileId), data);
+}
+
+/** Obtener datos de vendedor síncronamente desde caché */
+function getVendedorDataSync(profileId) {
+  return _vendedoresCache[profileId] || { contactos: [], deals: [], actividades: [] };
+}
+
+/** Precargar todos los vendedores al caché (llamar después del login de admin/ventas) */
+async function precargarVendedores() {
+  const vendedores = getProfiles()['venta'] || [];
+  await Promise.all(vendedores.map(v => getVendedorData(v.id)));
 }
 
 /* ── Perfiles por rol (fijos ahora, editables en el futuro desde configuración) ── */
@@ -162,16 +204,26 @@ const DEFAULT_PROFILES = {
   ],
 };
 
-/* ── Perfiles: leer y guardar ── */
-let _profilesCache = null; // caché en memoria para llamadas síncronas legacy
+/* ── Perfiles: leer y guardar — ver getProfiles() síncronos abajo ── */
 
-async function getProfiles() {
+/* ── Cache en memoria de perfiles (evita llamadas async desde contextos síncronos) ── */
+let _profilesCache = null;
+
+async function saveProfiles(profiles) {
+  _profilesCache = profiles; // actualizar caché inmediatamente
+  await sbSet(AUTH_PROFILES_KEY, profiles);
+}
+
+/** Versión síncrona usando caché; llama a loadProfilesCache() al inicio */
+function getProfiles() {
+  return _profilesCache || JSON.parse(JSON.stringify(DEFAULT_PROFILES));
+}
+
+/** Cargar perfiles desde Supabase al caché (llamar en loginStep2 e init) */
+async function loadProfilesCache() {
   try {
     const saved = await sbGet(AUTH_PROFILES_KEY);
-    if (!saved) {
-      _profilesCache = JSON.parse(JSON.stringify(DEFAULT_PROFILES));
-      return _profilesCache;
-    }
+    if (!saved) { _profilesCache = JSON.parse(JSON.stringify(DEFAULT_PROFILES)); return; }
     const result = JSON.parse(JSON.stringify(DEFAULT_PROFILES));
     Object.keys(result).forEach(role => {
       if (saved[role]) {
@@ -182,31 +234,11 @@ async function getProfiles() {
       }
     });
     _profilesCache = result;
-    return result;
-  } catch {
-    _profilesCache = JSON.parse(JSON.stringify(DEFAULT_PROFILES));
-    return _profilesCache;
-  }
+  } catch { _profilesCache = JSON.parse(JSON.stringify(DEFAULT_PROFILES)); }
 }
 
-/** Versión síncrona de respaldo — usa la última caché conocida (o defaults si nunca se cargó) */
-function getProfilesSync() {
-  return _profilesCache || JSON.parse(JSON.stringify(DEFAULT_PROFILES));
-}
-
-async function saveProfiles(profiles) {
-  _profilesCache = profiles; // actualizar caché de inmediato
-  await sbSet(AUTH_PROFILES_KEY, profiles);
-}
-
-async function getProfileById(role, profileId) {
-  const profiles = await getProfiles();
-  return profiles[role]?.find(p => p.id === profileId) || null;
-}
-
-/** Versión síncrona de respaldo — usa la caché en memoria */
-function getProfileByIdSync(role, profileId) {
-  return getProfilesSync()[role]?.find(p => p.id === profileId) || null;
+function getProfileById(role, profileId) {
+  return getProfiles()[role]?.find(p => p.id === profileId) || null;
 }
 
 const DEFAULT_PWD = { admin: 'admin', ventas: 'ventas', venta: 'venta' };
@@ -246,7 +278,7 @@ function canAccess(view) {
 }
 
 /* ── Login — Paso 1: seleccionar rol y mostrar perfiles ── */
-async function loginStep1() {
+function loginStep1() {
   const roleEl = document.querySelector('.role-card.active');
   const errEl  = document.getElementById('login-error');
   const role   = roleEl?.dataset.role;
@@ -263,7 +295,7 @@ async function loginStep1() {
   errEl.classList.add('hidden');
 
   // Construir el paso 2: selector de perfil
-  const profiles = (await getProfiles())[role] || [];
+  const profiles = getProfiles()[role] || [];
   const step1 = document.getElementById('login-step-1');
   const step2 = document.getElementById('login-step-2');
   const profileGrid = document.getElementById('login-profile-grid');
@@ -357,7 +389,7 @@ async function loginStep2() {
   if (!profileId) return showError('Selecciona tu perfil de acceso.');
   if (!pwd)       return showError('Ingresa tu contraseña.');
 
-  const profile = await getProfileById(role, profileId);
+  const profile = getProfileById(role, profileId);
   if (!profile || pwd !== profile.pwd) return showError('Contraseña incorrecta. Intenta de nuevo.');
 
   // ✅ Éxito
@@ -368,7 +400,14 @@ async function loginStep2() {
   // ── Cargar datos del perfil autenticado ──────────────────────
   // CRÍTICO: loadState() DESPUÉS de setear AUTH.role y AUTH.profileId
   // para que vendedores carguen su store privado, no el global.
-  loadState();
+  await loadState();
+
+  // Precargar cachés síncronos (perfiles, vendedores, notifs)
+  await loadProfilesCache();
+  if (AUTH.role === 'admin' || AUTH.role === 'ventas') {
+    await precargarVendedores();
+  }
+  await precargarNotifUsuario();
 
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
@@ -446,7 +485,7 @@ function applyRole() {
   const meta = ROLE_META[role] || ROLE_META.ventas;
 
   // Obtener datos del perfil activo
-  const profile = AUTH.profileId ? getProfileByIdSync(role, AUTH.profileId) : null;
+  const profile = AUTH.profileId ? getProfileById(role, AUTH.profileId) : null;
   const nombre  = profile?.nombre || meta.label;
   const cargo   = profile?.cargo  || '';
   const emoji   = profile?.emoji  || meta.icon;
@@ -1408,12 +1447,6 @@ function contactRowHTML(c, isRealizado = false) {
        </span>`
     : '';
 
-  // Mostrar quién agregó el contacto (solo visible para admin/director de ventas)
-  const isAdminView = AUTH.role === 'admin' || AUTH.role === 'ventas';
-  const creadorChip = (isAdminView && c.creadoPorNombre)
-    ? `<div class="contact-creador" style="font-size:11px;color:var(--n-400)">Agregado por: ${escapeHTML(c.creadoPorNombre)}</div>`
-    : '';
-
   return `<tr onclick="openDetalleModal('${c.id}')"
     title="Ver detalle de ${escapeHTML(c.nombre)}"
     style="background:${rowBg}${isRealizado ? ';opacity:.8' : ''}">
@@ -1425,7 +1458,6 @@ function contactRowHTML(c, isRealizado = false) {
       <div>
         <div class="contact-name">${escapeHTML(c.nombre)}</div>
         <div class="contact-email">${escapeHTML(c.email||'—')}</div>
-        ${creadorChip}
       </div>
     </div></td>
     <td style="font-size:13px;color:var(--n-600)">${escapeHTML(c.empresa||'—')}</td>
@@ -1647,7 +1679,26 @@ function closeAllModals() {
 /* ── 13. MODAL — CONTACTO ──────────────────────────────────── */
 
 function openContactoModal(id = null) {
-  const c = id ? S.contactos.find(x => x.id === id) : null;
+  let c = null;
+  if (id) {
+    const isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
+    if (isAdmin) {
+      const vendedorId = VISTA_VENDEDOR.vendedorId;
+      if (vendedorId) {
+        c = getVendedorDataSync(vendedorId).contactos.find(x => x.id === id);
+      } else {
+        // Buscar en todos los vendedores y en S
+        const todos = getAllVendedoresData();
+        for (const v of todos) {
+          c = v.contactos.find(x => x.id === id);
+          if (c) break;
+        }
+        if (!c) c = S.contactos.find(x => x.id === id);
+      }
+    } else {
+      c = S.contactos.find(x => x.id === id);
+    }
+  }
   document.getElementById('modal-contacto-title').textContent = c ? 'Editar Contacto' : 'Nuevo Contacto';
   document.getElementById('contacto-id').value = c?.id   || '';
   document.getElementById('c-nombre').value    = c?.nombre   || '';
@@ -1669,11 +1720,6 @@ async function saveContacto() {
 
   const id  = document.getElementById('contacto-id').value;
   const now = Date.now();
-
-  // Identificar quién hace la acción (para mostrar "agregado por")
-  const perfilActor = getProfileByIdSync(AUTH.role, AUTH.profileId);
-  const nombreActor = perfilActor?.nombre || (AUTH.role === 'prospecto' ? 'Formulario público' : 'Desconocido');
-
   const data = {
     nombre,
     empresa:      document.getElementById('c-empresa').value.trim(),
@@ -1685,41 +1731,88 @@ async function saveContacto() {
     actualizadoEn:now,
   };
 
-  if (id) {
-    const i = S.contactos.findIndex(c => c.id === id);
-    if (i >= 0) S.contactos[i] = { ...S.contactos[i], ...data };
-    toast('Actualizado', nombre, 'success');
-  } else {
-    S.contactos.push({
-      id: 'c'+uid(),
-      creadoEn: now,
-      creadoPorId: AUTH.profileId || null,
-      creadoPorRol: AUTH.role,
-      creadoPorNombre: nombreActor,
-      ...data,
-    });
-    toast('Contacto creado', nombre, 'success');
-  }
-
-  await saveState(); closeAllModals();
-
-  // Re-renderizar con la función correcta para el rol activo
   const isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
-  if (S.view === 'contactos')  { isAdmin ? contactosAdmin()  : contactos(); }
-  else if (S.view === 'dashboard') { isAdmin ? dashboardAdmin() : dashboard(); }
+
+  if (isAdmin) {
+    // Admin/Director: guardar en el vendedor seleccionado o en estado global (S)
+    const vendedorId = VISTA_VENDEDOR.vendedorId;
+    if (vendedorId) {
+      // Guardar en datos del vendedor específico
+      const vdata = getVendedorDataSync(vendedorId);
+      if (id) {
+        const i = vdata.contactos.findIndex(c => c.id === id);
+        if (i >= 0) vdata.contactos[i] = { ...vdata.contactos[i], ...data };
+      } else {
+        vdata.contactos.push({ id: 'c' + uid(), creadoEn: now, ...data });
+      }
+      await saveVendedorData(vendedorId, vdata);
+      toast(id ? 'Actualizado' : 'Contacto creado', nombre, 'success');
+    } else {
+      // Vista global: guardar en estado global (S)
+      if (id) {
+        const i = S.contactos.findIndex(c => c.id === id);
+        if (i >= 0) S.contactos[i] = { ...S.contactos[i], ...data };
+      } else {
+        S.contactos.push({ id: 'c' + uid(), creadoEn: now, ...data });
+      }
+      await saveState();
+      toast(id ? 'Actualizado' : 'Contacto creado', nombre, 'success');
+    }
+    closeAllModals();
+    if (S.view === 'contactos')   contactosAdmin();
+    else if (S.view === 'dashboard') dashboardAdmin();
+  } else {
+    // Vendedor individual: guardar en S (su propio store)
+    if (id) {
+      const i = S.contactos.findIndex(c => c.id === id);
+      if (i >= 0) S.contactos[i] = { ...S.contactos[i], ...data };
+      toast('Actualizado', nombre, 'success');
+    } else {
+      S.contactos.push({ id: 'c' + uid(), creadoEn: now, ...data });
+      toast('Contacto creado', nombre, 'success');
+    }
+    await saveState();
+    closeAllModals();
+    if (S.view === 'contactos')   contactos();
+    else if (S.view === 'dashboard') dashboard();
+  }
 }
 
-function deleteContacto(id) {
-  const c = S.contactos.find(x => x.id === id);
-  if (!c || !confirm(`¿Eliminar a ${c.nombre}? Sus deals y actividades también serán eliminados.`)) return;
-  S.contactos   = S.contactos.filter(x => x.id !== id);
-  S.deals       = S.deals.filter(d => d.contactoId !== id);
-  S.actividades = S.actividades.filter(a => a.contactoId !== id);
-  saveState(); closeAllModals();
+async function deleteContacto(id) {
+  const isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  let c;
 
-  const _isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
-  if (S.view === 'contactos') { _isAdmin ? contactosAdmin() : contactos(); }
-  else navigate(S.view);
+  if (isAdmin) {
+    const vendedorId = VISTA_VENDEDOR.vendedorId;
+    if (vendedorId) {
+      const vdata = getVendedorDataSync(vendedorId);
+      c = vdata.contactos.find(x => x.id === id);
+      if (!c || !confirm(`¿Eliminar a ${c.nombre}? Sus deals y actividades también serán eliminados.`)) return;
+      vdata.contactos   = vdata.contactos.filter(x => x.id !== id);
+      vdata.deals       = vdata.deals.filter(d => d.contactoId !== id);
+      vdata.actividades = vdata.actividades.filter(a => a.contactoId !== id);
+      await saveVendedorData(vendedorId, vdata);
+    } else {
+      c = S.contactos.find(x => x.id === id);
+      if (!c || !confirm(`¿Eliminar a ${c.nombre}? Sus deals y actividades también serán eliminados.`)) return;
+      S.contactos   = S.contactos.filter(x => x.id !== id);
+      S.deals       = S.deals.filter(d => d.contactoId !== id);
+      S.actividades = S.actividades.filter(a => a.contactoId !== id);
+      await saveState();
+    }
+    closeAllModals();
+    if (S.view === 'contactos') contactosAdmin();
+    else navigate(S.view);
+  } else {
+    c = S.contactos.find(x => x.id === id);
+    if (!c || !confirm(`¿Eliminar a ${c.nombre}? Sus deals y actividades también serán eliminados.`)) return;
+    S.contactos   = S.contactos.filter(x => x.id !== id);
+    S.deals       = S.deals.filter(d => d.contactoId !== id);
+    S.actividades = S.actividades.filter(a => a.contactoId !== id);
+    await saveState(); closeAllModals();
+    if (S.view === 'contactos') contactos();
+    else navigate(S.view);
+  }
   toast('Eliminado', c.nombre, 'warn');
 }
 
@@ -1761,11 +1854,26 @@ function marcarRealizado(id) {
 /* ── 14. MODAL — DEAL ──────────────────────────────────────── */
 
 function openDealModal(id = null, etapaDefault = null) {
-  const d = id ? S.deals.find(x => x.id === id) : null;
+  const isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  const vendedorId = isAdmin ? VISTA_VENDEDOR.vendedorId : null;
+  const contactosList = isAdmin
+    ? (vendedorId ? getVendedorDataSync(vendedorId).contactos : getAllVendedoresData().flatMap(v => v.contactos).concat(S.contactos))
+    : S.contactos;
+
+  let d = null;
+  if (id) {
+    if (isAdmin) {
+      const data = vendedorId ? getVendedorDataSync(vendedorId) : getDataParaVista(null);
+      d = data.deals.find(x => x.id === id);
+      if (!d) d = S.deals.find(x => x.id === id);
+    } else {
+      d = S.deals.find(x => x.id === id);
+    }
+  }
 
   document.getElementById('d-contacto').innerHTML =
     '<option value="">— Selecciona contacto —</option>' +
-    S.contactos.map(c => `<option value="${c.id}"${d?.contactoId===c.id?' selected':''}>${escapeHTML(c.nombre)}</option>`).join('');
+    contactosList.map(c => `<option value="${c.id}"${d?.contactoId===c.id?' selected':''}>${escapeHTML(c.nombre)}</option>`).join('');
 
   document.getElementById('d-etapa').innerHTML =
     ETAPAS.map(e => `<option value="${e.id}"${(d?.etapa||etapaDefault||'prospecto_id')===e.id?' selected':''}>${e.emoji} ${e.label}</option>`).join('');
@@ -1781,7 +1889,7 @@ function openDealModal(id = null, etapaDefault = null) {
   setTimeout(() => document.getElementById('d-titulo').focus(), 80);
 }
 
-function saveDeal() {
+async function saveDeal() {
   const titulo     = document.getElementById('d-titulo').value.trim();
   const contactoId = document.getElementById('d-contacto').value;
   const valor      = parseFloat(document.getElementById('d-valor').value) || 0;
@@ -1799,85 +1907,90 @@ function saveDeal() {
     actualizadoEn: now,
   };
 
-  // Registrar inicio de onboarding al guardar desde el modal
+  const isAdmin    = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  const vendedorId = isAdmin ? VISTA_VENDEDOR.vendedorId : null;
+
+  // Helper para obtener/guardar el store correcto
+  const getStore = () => vendedorId ? getVendedorDataSync(vendedorId) : null;
+  const putStore = async (store) => {
+    if (vendedorId) await saveVendedorData(vendedorId, store);
+    else await saveState();
+  };
+  const getDealsArr  = (store) => store ? store.deals       : S.deals;
+  const getActsArr   = (store) => store ? store.actividades : S.actividades;
+  const getContsArr  = (store) => store ? store.contactos   : S.contactos;
+  const setDealsArr  = (store, arr) => { if (store) store.deals       = arr; else S.deals       = arr; };
+  const setActsArr   = (store, arr) => { if (store) store.actividades = arr; else S.actividades = arr; };
+
+  const store = getStore();
+
+  // Registrar inicio de onboarding
   if (['ganado', 'onboarding'].includes(data.etapa)) {
-    const existente = S.deals.find(d => d.id === id);
-    if (!existente?.onboardingStartedAt) {
-      data.onboardingStartedAt = now;
-    }
+    const existente = getDealsArr(store).find(d => d.id === id);
+    if (!existente?.onboardingStartedAt) data.onboardingStartedAt = now;
   }
 
   if (id) {
-    // ── Edición: actualizar deal ──────────────────────────────
-    const i = S.deals.findIndex(d => d.id === id);
-    if (i >= 0) S.deals[i] = { ...S.deals[i], ...data };
+    const arr = getDealsArr(store);
+    const i   = arr.findIndex(d => d.id === id);
+    if (i >= 0) arr[i] = { ...arr[i], ...data };
+    setDealsArr(store, arr);
     toast('Deal actualizado', titulo, 'success');
-
-    saveState(); closeAllModals();
-    const _isAdminSD = AUTH.role === 'admin' || AUTH.role === 'ventas';
-    if      (S.view === 'pipeline')    { _isAdminSD ? pipelineAdmin()    : pipeline();    }
-    else if (S.view === 'dashboard')   { _isAdminSD ? dashboardAdmin()   : dashboard();   }
-    else if (S.view === 'actividades') { _isAdminSD ? actividadesAdmin() : actividades(); }
+    await putStore(store);
+    closeAllModals();
+    if      (S.view === 'pipeline')    { isAdmin ? pipelineAdmin()    : pipeline();    }
+    else if (S.view === 'dashboard')   { isAdmin ? dashboardAdmin()   : dashboard();   }
+    else if (S.view === 'actividades') { isAdmin ? actividadesAdmin() : actividades(); }
 
   } else {
-    // ── Nuevo deal: guardar + registrar actividad automática ──
     const newDealId = 'd' + uid();
-    // Asignar vendedorId al perfil activo si es vendedor
-    if (AUTH.role === 'venta' && AUTH.profileId) {
-      data.vendedorId = AUTH.profileId;
-    }
-    S.deals.push({ id: newDealId, creadoEn: now, ...data });
-    // ── Notificación deal nuevo → acumular en panel + enviar por WA ──
-    const _perfilActivo = getProfileByIdSync(AUTH.role, AUTH.profileId);
+    if (!isAdmin && AUTH.profileId) data.vendedorId = AUTH.profileId;
+    else if (vendedorId)            data.vendedorId = vendedorId;
+
+    const dealsArr = getDealsArr(store);
+    dealsArr.push({ id: newDealId, creadoEn: now, ...data });
+    setDealsArr(store, dealsArr);
+
+    // Notificación
+    const _perfilActivo = getProfileById(AUTH.role, AUTH.profileId);
     const _datosDeal = {
-      titulo:               titulo,
-      contacto:             data.contacto || getContacto(data.contactoId)?.nombre || 'Sin contacto',
-      valor:                data.valor ? fmtMXN(data.valor) : 'No definido',
-      proximaAccion:        data.proximaAccion || 'Sin definir',
-      vendedor:             _perfilActivo?.nombre || 'Sin asignar',
-      _vendedorProfileId:   AUTH.role === 'venta' ? AUTH.profileId : null,
+      titulo, valor: valor ? fmtMXN(valor) : 'No definido',
+      contacto:          getContsArr(store).find(c => c.id === contactoId)?.nombre || 'Sin contacto',
+      proximaAccion:     data.proximaAccion || 'Sin definir',
+      vendedor:          _perfilActivo?.nombre || 'Sin asignar',
+      _vendedorProfileId: AUTH.role === 'venta' ? AUTH.profileId : null,
     };
     acumularNotificacionSegmentada('deal_nuevo', _datosDeal, _perfilActivo);
-    // Solo abrir WhatsApp si quien crea el deal es admin o director de ventas,
-    // nunca cuando es un vendedor (role === 'venta')
     if (AUTH.role !== 'venta') {
       notificarWhatsApp('deal_nuevo', _datosDeal, 'admin');
       notificarWhatsApp('deal_nuevo', _datosDeal, 'ventas');
     }
 
+    // Actividad automática
     const etapaLabel = getEtapa(data.etapa).label;
     const partes = [
-      `Deal creado: "${titulo}"`,
-      `Etapa: ${etapaLabel}`,
-      data.valor         ? `Valor: ${fmtMXN(data.valor)}`               : null,
+      `Deal creado: "${titulo}"`, `Etapa: ${etapaLabel}`,
+      valor           ? `Valor: ${fmtMXN(valor)}`                   : null,
       data.fechaLimite   ? `Fecha límite: ${fmtDate(data.fechaLimite)}` : null,
       data.proximaAccion ? `Próxima acción: ${data.proximaAccion}`       : null,
       data.notas         ? `Notas: ${data.notas}`                        : null,
     ].filter(Boolean);
-
-    S.actividades.push({
-      id:          'a' + uid(),
-      tipo:        'nota',
-      contactoId:  contactoId || null,
-      descripcion: partes.join(' · '),
-      creadoEn:    now,
-    });
+    const actsArr = getActsArr(store);
+    actsArr.push({ id: 'a'+uid(), tipo:'nota', contactoId: contactoId||null, descripcion: partes.join(' · '), creadoEn: now });
+    setActsArr(store, actsArr);
 
     // Actualizar timestamp del contacto
-    if (contactoId) {
-      const c = S.contactos.find(x => x.id === contactoId);
-      if (c) c.actualizadoEn = now;
-    }
+    const contArr = getContsArr(store);
+    const c = contArr.find(x => x.id === contactoId);
+    if (c) c.actualizadoEn = now;
 
-    saveState(); closeAllModals();
-    const _isAdminND = AUTH.role === 'admin' || AUTH.role === 'ventas';
-    if      (S.view === 'pipeline')    { _isAdminND ? pipelineAdmin()  : (pipeline(), setTimeout(() => openDealDrawer(newDealId), 120)); }
-    else if (S.view === 'dashboard')   { _isAdminND ? dashboardAdmin() : dashboard(); }
-    else if (S.view === 'actividades') { _isAdminND ? actividadesAdmin() : actividades(); }
-
+    await putStore(store);
+    closeAllModals();
+    if      (S.view === 'pipeline')    { isAdmin ? pipelineAdmin()  : (pipeline(), setTimeout(() => openDealDrawer(newDealId), 120)); }
+    else if (S.view === 'dashboard')   { isAdmin ? dashboardAdmin() : dashboard(); }
+    else if (S.view === 'actividades') { isAdmin ? actividadesAdmin() : actividades(); }
     toast('Deal creado', titulo, 'success');
   }
-
 }
 
 function deleteDeal(id) {
@@ -1893,34 +2006,46 @@ function deleteDeal(id) {
 /* ── 15. MODAL — ACTIVIDAD ─────────────────────────────────── */
 
 function openActividadModal(preselContactoId = null) {
+  const isAdmin    = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  const vendedorId = isAdmin ? VISTA_VENDEDOR.vendedorId : null;
+  const contactosList = isAdmin
+    ? (vendedorId ? getVendedorDataSync(vendedorId).contactos : getAllVendedoresData().flatMap(v => v.contactos).concat(S.contactos))
+    : S.contactos;
+
   document.getElementById('act-contacto').innerHTML =
     '<option value="">— Elige contacto —</option>' +
-    S.contactos.map(c => `<option value="${c.id}"${preselContactoId===c.id?' selected':''}>${escapeHTML(c.nombre)}</option>`).join('');
+    contactosList.map(c => `<option value="${c.id}"${preselContactoId===c.id?' selected':''}>${escapeHTML(c.nombre)}</option>`).join('');
   document.getElementById('act-descripcion').value = '';
   document.getElementById('act-tipo').value = 'whatsapp';
   openModal('modal-actividad');
   setTimeout(() => document.getElementById('act-descripcion').focus(), 80);
 }
 
-function saveActividad() {
+async function saveActividad() {
   const desc = document.getElementById('act-descripcion').value.trim();
   if (!desc) { toast('Requerido', 'La descripción es obligatoria.', 'error'); return; }
 
+  const isAdmin    = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  const vendedorId = isAdmin ? VISTA_VENDEDOR.vendedorId : null;
   const now  = Date.now();
   const cid  = document.getElementById('act-contacto').value || null;
   const act  = { id:'a'+uid(), tipo:document.getElementById('act-tipo').value, contactoId:cid, descripcion:desc, creadoEn:now };
-  S.actividades.push(act);
 
-  if (cid) {
-    const c = S.contactos.find(x => x.id === cid);
-    if (c) c.actualizadoEn = now;
+  if (isAdmin && vendedorId) {
+    const vdata = getVendedorDataSync(vendedorId);
+    vdata.actividades.push(act);
+    if (cid) { const c = vdata.contactos.find(x => x.id === cid); if (c) c.actualizadoEn = now; }
+    await saveVendedorData(vendedorId, vdata);
+  } else {
+    S.actividades.push(act);
+    if (cid) { const c = S.contactos.find(x => x.id === cid); if (c) c.actualizadoEn = now; }
+    await saveState();
   }
 
-  saveState(); closeAllModals();
-  const _isAdminSA = AUTH.role === 'admin' || AUTH.role === 'ventas';
-  if (S.view === 'actividades')  { _isAdminSA ? actividadesAdmin() : actividades();  }
-  else if (S.view === 'dashboard') { _isAdminSA ? dashboardAdmin()  : dashboard();    }
-  else if (S.view === 'pipeline')  { _isAdminSA ? pipelineAdmin()   : pipeline();     }
+  closeAllModals();
+  if      (S.view === 'actividades')  { isAdmin ? actividadesAdmin() : actividades();  }
+  else if (S.view === 'dashboard')    { isAdmin ? dashboardAdmin()   : dashboard();    }
+  else if (S.view === 'pipeline')     { isAdmin ? pipelineAdmin()    : pipeline();     }
   toast('Actividad registrada', ACT_LABELS[act.tipo], 'success');
 }
 
@@ -2343,15 +2468,23 @@ function wireUpButtons() {
 
 async function init() {
 
+  // Precargar perfiles antes de mostrar la pantalla de login
+  await loadProfilesCache();
+
   setupLoginScreen();
 
   // Restaurar sesión activa (recarga de pestaña)
   if (restoreSession()) {
     // Con sesión activa: cargar datos del rol correcto DESPUÉS de conocer el rol
+    await loadProfilesCache();
     const hasData = await loadState();
     if (!hasData && (AUTH.role === 'admin' || AUTH.role === 'ventas')) {
-      await seedData();
+      seedData();
     }
+    if (AUTH.role === 'admin' || AUTH.role === 'ventas') {
+      await precargarVendedores();
+    }
+    await precargarNotifUsuario();
 
     document.getElementById('login-screen').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
@@ -2359,7 +2492,7 @@ async function init() {
     document.getElementById('login-step-1')?.classList.remove('hidden');
     document.getElementById('login-step-2')?.classList.add('hidden');
 
-    await applyRole();
+    applyRole();
     wireUpButtons();
     setupSearch();
     setupQuickMenu();
@@ -2377,10 +2510,10 @@ async function init() {
   } else {
     // Sin sesión: precargar datos globales de ejemplo si no existen
     // Los vendedores (venta) NO precargan nada — sus datos se cargan en loginStep2
-    const globalRaw = await sbGet(STORAGE_KEY);
+    const globalRaw = localStorage.getItem(STORAGE_KEY);
     if (!globalRaw) {
       // Seed de datos de muestra para admin/ventas (seedData ignora role=venta por diseño)
-      await seedData();
+      seedData();
       // Guardar sin contaminar S — limpiar S después
       S.contactos = []; S.deals = []; S.actividades = [];
     }
@@ -2661,13 +2794,13 @@ function enviarNotifWA(notifId) {
   let perfilesWA = [];
   if (AUTH.role === 'admin') {
     // Admin envía a todos los admins con número
-    perfilesWA = (getProfilesSync()['admin'] || []).filter(p => p.tel);
+    perfilesWA = (getProfiles()['admin'] || []).filter(p => p.tel);
   } else if (AUTH.role === 'ventas') {
     // Director de ventas envía a todos los directores con número
-    perfilesWA = (getProfilesSync()['ventas'] || []).filter(p => p.tel);
+    perfilesWA = (getProfiles()['ventas'] || []).filter(p => p.tel);
   } else if (AUTH.role === 'venta') {
     // Vendedor individual envía a sí mismo
-    const propio = getProfileByIdSync('venta', AUTH.profileId);
+    const propio = getProfileById('venta', AUTH.profileId);
     if (propio?.tel) perfilesWA = [propio];
   }
 
@@ -2705,11 +2838,11 @@ function enviarTodasNotif() {
 
   let perfilesWA = [];
   if (AUTH.role === 'admin') {
-    perfilesWA = (getProfilesSync()['admin'] || []).filter(p => p.tel);
+    perfilesWA = (getProfiles()['admin'] || []).filter(p => p.tel);
   } else if (AUTH.role === 'ventas') {
-    perfilesWA = (getProfilesSync()['ventas'] || []).filter(p => p.tel);
+    perfilesWA = (getProfiles()['ventas'] || []).filter(p => p.tel);
   } else if (AUTH.role === 'venta') {
-    const propio = getProfileByIdSync('venta', AUTH.profileId);
+    const propio = getProfileById('venta', AUTH.profileId);
     if (propio?.tel) perfilesWA = [propio];
   }
 
@@ -2778,7 +2911,7 @@ function abrirModalPerfil() {
   const role      = AUTH.role;
   const profileId = AUTH.profileId;
   if (role === 'prospecto') return;
-  const profile   = getProfileByIdSync(role, profileId);
+  const profile   = getProfileById(role, profileId);
   if (!profile) return;
 
   document.getElementById('perfil-modal-avatar').textContent = initials(profile.nombre);
@@ -2794,7 +2927,7 @@ function abrirModalPerfil() {
   setTimeout(() => document.getElementById('perfil-tel').focus(), 80);
 }
 
-async function guardarMiPerfil() {
+function guardarMiPerfil() {
   const role      = AUTH.role;
   const profileId = AUTH.profileId;
   const tel       = document.getElementById('perfil-tel').value.trim().replace(/[\s\-\+]/g, '');
@@ -2805,13 +2938,13 @@ async function guardarMiPerfil() {
     return;
   }
 
-  const profiles = await getProfiles();
+  const profiles = getProfiles();
   const perfil   = profiles[role]?.find(p => p.id === profileId);
   if (!perfil) return;
 
   perfil.tel   = tel;
   perfil.email = email;
-  await saveProfiles(profiles);
+  saveProfiles(profiles);
 
   // Actualizar sidebar en tiempo real
   const telEl   = document.getElementById('sidebar-user-tel');
@@ -2863,11 +2996,11 @@ async function checkNotificaciones() {
     // Perfil del vendedor dueño del deal
     const vendedorProfileId = deal.vendedorId || null;
     const perfilVendedor    = vendedorProfileId
-      ? getProfileByIdSync('venta', vendedorProfileId)
+      ? getProfileById('venta', vendedorProfileId)
       : null;
 
     // El perfil "origen" que aparecerá en la notificación
-    const perfilOrigen = perfilVendedor || (AUTH.profileId ? getProfileByIdSync(AUTH.role, AUTH.profileId) : null);
+    const perfilOrigen = perfilVendedor || (AUTH.profileId ? getProfileById(AUTH.role, AUTH.profileId) : null);
 
     // ── Detector 1: Reunión próxima ──────────────────────────
     if (deal.fechaLimite) {
@@ -2912,9 +3045,9 @@ async function checkNotificaciones() {
   // Si es admin/ventas, también revisar deals de TODOS los vendedores
   // (sus stores privados) para tener visibilidad completa
   if (AUTH.role === 'admin' || AUTH.role === 'ventas') {
-    const todosVendedores = getProfilesSync()['venta'] || [];
+    const todosVendedores = getProfiles()['venta'] || [];
     todosVendedores.forEach(vendedor => {
-      const vd = getVendedorData(vendedor.id);
+      const vd = getVendedorDataSync(vendedor.id);
       (vd.deals || []).forEach(deal => {
         if (etapasIgnorar.includes(deal.etapa)) return;
         const contactos   = vd.contactos || [];
@@ -3135,11 +3268,11 @@ const VISTA_VENDEDOR = {
   seccion:     'pipeline', // pipeline | contactos | actividades
 };
 
-/* ── Obtener todos los datos agregados de todos los vendedores ── */
+/* ── Obtener todos los datos agregados de todos los vendedores (usa caché síncrona) ── */
 function getAllVendedoresData() {
-  const vendedores = getProfilesSync()['venta'] || [];
+  const vendedores = getProfiles()['venta'] || [];
   return vendedores.map(v => {
-    const data = getVendedorData(v.id);
+    const data = getVendedorDataSync(v.id);
     return {
       perfil:      v,
       contactos:   data.contactos   || [],
@@ -3149,7 +3282,7 @@ function getAllVendedoresData() {
   });
 }
 
-/* ── Obtener datos de un vendedor específico o del global ── */
+/* ── Obtener datos de un vendedor específico o del global (usa caché síncrona) ── */
 function getDataParaVista(vendedorId) {
   if (!vendedorId) {
     // Vista global: mezclar todos los vendedores
@@ -3160,12 +3293,12 @@ function getDataParaVista(vendedorId) {
       actividades: todos.flatMap(v => v.actividades),
     };
   }
-  return getVendedorData(vendedorId);
+  return getVendedorDataSync(vendedorId);
 }
 
 /* ── Render del selector de vendedor (tabs) ── */
 function renderVendedorSelectorHTML(seccionActiva) {
-  const vendedores = getProfilesSync()['venta'] || [];
+  const vendedores = getProfiles()['venta'] || [];
   const sel        = VISTA_VENDEDOR.vendedorId;
 
   const tabs = [
@@ -3185,7 +3318,7 @@ function renderVendedorSelectorHTML(seccionActiva) {
     >
       ${t.label}
       ${t.id ? (() => {
-        const d = getVendedorData(t.id);
+        const d = getVendedorDataSync(t.id);
         const activos = (d.deals || []).filter(x => !['ganado','perdido'].includes(x.etapa)).length;
         return activos > 0 ? `<span class="vendedor-tab-badge">${activos}</span>` : '';
       })() : ''}
@@ -3199,7 +3332,7 @@ function renderVendedorSelectorHTML(seccionActiva) {
   const pipeline = activos.reduce((s,d) => s+(d.valor||0), 0);
 
   const nombreVendedor = sel
-    ? (getProfileByIdSync('venta', sel)?.nombre || '—')
+    ? (getProfileById('venta', sel)?.nombre || '—')
     : 'Todos los vendedores';
 
   return `
@@ -3337,7 +3470,7 @@ function pipelineAdmin() {
 function dealCardAdminHTML(d, getContactoFn) {
   const c    = getContactoFn(d.contactoId);
   const over = isOverdue(d.fechaLimite) && !['ganado','perdido'].includes(d.etapa);
-  const vendedor = getProfileByIdSync('venta', d.vendedorId);
+  const vendedor = getProfileById('venta', d.vendedorId);
   const vendedorId = d.vendedorId || null;
 
   return `<div class="deal-card"
@@ -3366,7 +3499,7 @@ function dealCardAdminHTML(d, getContactoFn) {
 /* ── Drawer admin: busca datos en el store del vendedor correcto ── */
 function openDealDrawerAdmin(dealId, vendedorId) {
   // Obtener datos del vendedor correspondiente o del global
-  const data = vendedorId ? getVendedorData(vendedorId) : getDataParaVista(null);
+  const data = vendedorId ? getVendedorDataSync(vendedorId) : getDataParaVista(null);
   const d    = data.deals.find(x => x.id === dealId);
   if (!d) return;
 
@@ -3380,7 +3513,7 @@ function openDealDrawerAdmin(dealId, vendedorId) {
     <span class="badge" style="background:${e.bg};color:${e.tc};font-size:10px">${e.emoji} ${e.label}</span>
     ${c ? `<span style="font-size:11px;color:var(--n-500)">· ${escapeHTML(c.nombre)}</span>` : ''}
     ${vendedorId ? (() => {
-      const vp = getProfileByIdSync('venta', vendedorId);
+      const vp = getProfileById('venta', vendedorId);
       return vp ? `<span style="font-size:11px;color:var(--n-500)">· ${vp.emoji} ${vp.nombre}</span>` : '';
     })() : ''}`;
 
@@ -3476,8 +3609,8 @@ function contactosAdmin() {
 
       // Vendedor asignado
       const vendedorPerfil = VISTA_VENDEDOR.vendedorId
-        ? getProfileByIdSync('venta', VISTA_VENDEDOR.vendedorId)
-        : (dealAct?.vendedorId ? getProfileByIdSync('venta', dealAct.vendedorId) : null);
+        ? getProfileById('venta', VISTA_VENDEDOR.vendedorId)
+        : (dealAct?.vendedorId ? getProfileById('venta', dealAct.vendedorId) : null);
 
       html += `<tr>
         <td><div class="contact-row-name">
@@ -3593,24 +3726,24 @@ function actividadesAdmin() {
 }
 
 /* ── Marcar actividad realizada desde vista admin ── */
-function marcarActividadRealizadaAdmin(actId, vendedorId) {
+async function marcarActividadRealizadaAdmin(actId, vendedorId) {
   let encontrado = false;
   if (vendedorId) {
-    const vd = getVendedorData(vendedorId);
+    const vd = getVendedorDataSync(vendedorId);
     const a  = (vd.actividades || []).find(x => x.id === actId);
-    if (a) { a.realizado = true; a.realizadoEn = Date.now(); saveVendedorData(vendedorId, vd); encontrado = true; }
+    if (a) { a.realizado = true; a.realizadoEn = Date.now(); await saveVendedorData(vendedorId, vd); encontrado = true; }
   }
   if (!encontrado) {
-    const vendedores = getProfilesSync()['venta'] || [];
+    const vendedores = getProfiles()['venta'] || [];
     for (const v of vendedores) {
-      const vd = getVendedorData(v.id);
+      const vd = getVendedorDataSync(v.id);
       const a  = (vd.actividades || []).find(x => x.id === actId);
-      if (a) { a.realizado = true; a.realizadoEn = Date.now(); saveVendedorData(v.id, vd); encontrado = true; break; }
+      if (a) { a.realizado = true; a.realizadoEn = Date.now(); await saveVendedorData(v.id, vd); encontrado = true; break; }
     }
   }
   if (!encontrado) {
     const a = S.actividades.find(x => x.id === actId);
-    if (a) { a.realizado = true; a.realizadoEn = Date.now(); saveState(); }
+    if (a) { a.realizado = true; a.realizadoEn = Date.now(); await saveState(); }
   }
   actividadesAdmin();
   setTimeout(() => {
